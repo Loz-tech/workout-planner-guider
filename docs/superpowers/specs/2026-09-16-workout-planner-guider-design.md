@@ -87,11 +87,16 @@ exercises (                          -- exercise catalog
 -- User rows: full CRUD, owner-only. Clients never write builtin rows.
 
 programs (
-  id uuid PK, owner_id uuid NOT NULL,
-  name text NOT NULL, description text,
+  id uuid PK,
+  owner_id uuid NULL,                -- NULL = builtin beginner template (read-only)
+  is_template bool NOT NULL DEFAULT false,
+  name text NOT NULL, description text NOT NULL,
   active_revision_id uuid NULL,      -- points into program_revisions
   created_at, updated_at, revision, deleted_at
 )
+-- RLS: builtin rows (owner_id IS NULL): authenticated SELECT only (catalog AND
+-- builtin templates). User rows: full CRUD, owner-only. Clients never write
+-- builtin rows (templates are copied into user-owned programs before editing).
 
 program_revisions (                  -- immutable snapshot; a "version" of a program
   id uuid PK, program_id uuid NOT NULL,
@@ -198,6 +203,13 @@ sync_state (
 device_registry (device_id uuid PK, created_at)   -- local-only device identity
 ```
 
+Server-side sync support tables (not user-visible data):
+
+```sql
+applied_ops (op_id uuid PK, applied_at timestamptz NOT NULL)   -- idempotency ledger
+-- every synced table additionally carries commit_ts (trigger-stamped)
+```
+
 The local DB is the single read source for the UI. The server is the reconciliation authority; the client never assumes its local write "won" until the server confirms it.
 
 ## 5. Command layer (the only write path)
@@ -243,7 +255,7 @@ sealed interface Command {
 
 ### 6.3 Pull
 
-- Per-table cursor (`last_pulled_at`): pull via RPC `pull_changes(cursors jsonb)` returning rows where server `updated_at > cursor` **ordered by commit order**, plus tombstones. Cursor advances to the last committed change's boundary transaction; server stores `commit_ts` per row via trigger to make the cursor durable and gap-free.
+- Per-table cursor (`last_pulled_at`): pull via RPC `pull_changes(cursors jsonb)` returning rows whose `commit_ts > cursor` **ordered by commit order**, plus tombstones. Every row's `commit_ts` is stamped by a DB trigger from the committing transaction, making the cursor durable and gap-free; the cursor advances to the boundary of the last fully-returned commit.
 - Tombstoned rows are applied locally as deletes; server garbage-collects tombstones after 90 days.
 - On reconnect after failure: cursors are the recovery state; a full re-pull is the fallback if cursors look inconsistent.
 
